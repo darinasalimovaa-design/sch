@@ -5,6 +5,7 @@ import os
 import threading
 import traceback
 import time
+from queue import Queue, Full
 
 app = Flask(__name__)
 
@@ -126,6 +127,18 @@ def main_keyboard():
     return {"keyboard": [[{"text": "☞ Зᴀяʙᴋᴀ нᴀ ʙхᴏд"}, {"text": "☞ Зᴀяʙᴋᴀ нᴀ ᴩᴇᴄᴛ"}], [{"text": "️☞ Ꭺнᴏниʍнᴀя ��ᴀᴧᴏбᴀ"}, {"text": "☞ Ꮻᴛʍᴇнᴀ"}]], "resize_keyboard": True, "one_time_keyboard": False}
 
 
+def admin_keyboard():
+    return {"keyboard": [[{"text": "спящие"}, {"text": "мяукают"}, {"text": "кто отдыхает"}], [{"text": "☞ Ꮻᴛʍᴇнᴀ"}]], "resize_keyboard": True, "one_time_keyboard": False}
+
+
+def get_menu_keyboard(is_private, is_admin_chat):
+    if is_admin_chat:
+        return admin_keyboard()
+    if is_private:
+        return main_keyboard()
+    return None
+
+
 def get_reject_keyboard(kind, user_id):
     return {"inline_keyboard": [[{"text": "✉️ Дать обратную связь", "callback_data": f"reject_{kind}_fb_{user_id}"}, {"text": "🚫 Без обратной связи", "callback_data": f"reject_{kind}_nofb_{user_id}"}]]}
 
@@ -190,12 +203,11 @@ def reminder_loop():
 
 
 threading.Thread(target=reminder_loop, daemon=True).start()
+UPDATE_QUEUE = Queue(maxsize=1000)
 
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
+def process_update(data):
     try:
-        data = request.get_json(silent=True)
         if not data:
             return "ok", 200
 
@@ -406,8 +418,17 @@ def webhook():
         is_admin_chat = chat_id == ADMIN_GROUP_ID or chat_id == ADMIN_ID
         is_private = chat_type == "private"
         is_menu_click = text in MENU_TEXTS
+        normalized_text = text.lower().strip()
+        active_type = users.get(chat_id_str, {}).get("type")
 
-        if text.lower().strip() == "спящие" and is_admin_chat:
+        if is_menu_click and active_type not in ACTIVE_TYPING:
+            menu_keyboard = get_menu_keyboard(is_private, is_admin_chat)
+            if menu_keyboard:
+                menu_text = "— Иᴄᴨᴏᴧьɜуй ᴋнᴏᴨᴋи ʍᴇню нижᴇ." if not is_admin_chat else "— Иᴄᴨᴏᴧьɜуй ᴀдʍин-ʍᴇню нижᴇ."
+                send_message(chat_id, menu_text, reply_markup=menu_keyboard)
+            return "ok", 200
+
+        if normalized_text == "спящие" and is_admin_chat:
             if not bookings:
                 send_message(chat_id, "— Список броней пуст.")
                 return "ok", 200
@@ -415,12 +436,12 @@ def webhook():
             send_message(chat_id, "🕓 Список броней:", reply_markup={"inline_keyboard": kb})
             return "ok", 200
 
-        if text.lower().strip() == "мяукают" and is_admin_chat:
+        if normalized_text == "мяукают" and is_admin_chat:
             items = [f"• {info.get('first_name', '')} (@{info.get('username', 'Нет username')}) — {info.get('step', '')} — {info.get('chosen_chat', 'не выбран')}" for _, info in users.items() if info.get("type") == "join"]
             send_message(chat_id, "— Активных заявок на вход нет." if not items else "🐾 Заявки на вход:\n\n" + "\n".join(items[:50]))
             return "ok", 200
 
-        if text.lower().strip() == "кто отдыхает" and is_admin_chat:
+        if normalized_text == "кто отдыхает" and is_admin_chat:
             items = [f"• {info.get('first_name', '')} (@{info.get('username', 'Нет username')}) — {info.get('step', '')}" for _, info in users.items() if info.get("type") == "rest"]
             send_message(chat_id, "— Активных заявок на рест нет." if not items else "🛌 Кто отдыхает:\n\n" + "\n".join(items[:50]))
             return "ok", 200
@@ -460,7 +481,7 @@ def webhook():
                 kb = {"inline_keyboard": [[{"text": "𐌿ρᥙняᴛь ⲙяучᥱ᧘᧐", "callback_data": f"approve_join_{chat_id}"}, {"text": "𐌿ρ᧐ᴦнᥲᴛь ᥰᥴᥲ", "callback_data": f"reject_join_{chat_id}"}]]}
                 send_bg(ADMIN_GROUP_ID, admin_msg, reply_markup=kb)
                 send_bg(ADMIN_ID, admin_msg, reply_markup=kb)
-                send_message(chat_id, "✔︎ ɜᴀяʙᴋᴀ ᴏᴛᴨᴩᴀʙᴧᴇнᴀ. Ꮎжидᴀй ᴩᴇɯᴇния.", reply_markup=main_keyboard())
+                send_message(chat_id, "✔︎ ɜᴀяʙᴋᴀ ᴏᴛᴨᴩᴀʙᴧᴇнᴀ. Ꮎжидᴀй ᴩᴇɯᴇния.", reply_markup=get_menu_keyboard(is_private, is_admin_chat))
                 users[chat_id_str]["step"] = "join_wait_admin"
                 save_users(users)
                 return "ok", 200
@@ -492,7 +513,7 @@ def webhook():
                 kb = {"inline_keyboard": [[{"text": "𐌿ρᥙняᴛь ⲙяучᥱ᧘᧐", "callback_data": f"approve_rest_{chat_id}"}, {"text": "𐌿ρ᧐ᴦнᥲᴛь ᥰᥴᥲ", "callback_data": f"reject_rest_{chat_id}"}]]}
                 send_bg(ADMIN_GROUP_ID, admin_msg, reply_markup=kb)
                 send_bg(ADMIN_ID, admin_msg, reply_markup=kb)
-                send_message(chat_id, "✔︎ ɜᴀяʙᴋᴀ нᴀ ᴩᴇᴄᴛ ᴏᴛᴨᴀʙʙᴧᴇнᴀ. Ꮎжидᴀй ᴩᴇɯᴇния.", reply_markup=main_keyboard())
+                send_message(chat_id, "✔︎ ɜᴀяʙᴋᴀ нᴀ ᴩᴇᴄᴛ ᴏᴛᴨᴀʙʙᴧᴇнᴀ. Ꮎжидᴀй ᴩᴇɯᴇния.", reply_markup=get_menu_keyboard(is_private, is_admin_chat))
                 del users[chat_id_str]
                 save_users(users)
                 return "ok", 200
@@ -507,7 +528,7 @@ def webhook():
             admin_msg = f"⚠︎ жᴀᴧᴏбᴀ\n\n✎ Тᴇᴋᴄᴛ:\n{text}\n\nОᴛᴨᴩᴀʙᴧᴇнᴏ ᴀнᴏниʍнᴏ"
             send_bg(ADMIN_GROUP_ID, admin_msg)
             send_bg(ADMIN_ID, admin_msg)
-            send_message(chat_id, "✔︎ Вᴀɯᴀ жᴀᴧᴏбᴀ ᴏᴛᴨᴀʙʙᴧᴇнᴀ ᴀнᴏниʍнᴏ.", reply_markup=main_keyboard())
+            send_message(chat_id, "✔︎ Вᴀɯᴀ жᴀᴧᴏбᴀ ᴏᴛᴨᴀʙʙᴧᴇнᴀ ᴀнᴏниʍнᴏ.", reply_markup=get_menu_keyboard(is_private, is_admin_chat))
             del users[chat_id_str]
             save_users(users)
             return "ok", 200
@@ -515,7 +536,7 @@ def webhook():
         if text == "☞ Ꮻᴛʍᴇнᴀ":
             users.pop(chat_id_str, None)
             save_users(users)
-            send_message(chat_id, "✘ Ꭲᴇᴋуɯᴇᴇ дᴇйᴄᴛʙиᴇ ᴏтʍᴇнᴇнᴏ." if is_private else "— Ꮋᴇᴛ ᴀᴋᴛиʙныx дᴇйᴄᴛʙий.", reply_markup=main_keyboard())
+            send_message(chat_id, "✘ Ꭲᴇᴋуɯᴇᴇ дᴇйᴄᴛʙиᴇ ᴏтʍᴇнᴇнᴏ." if is_private else "— Ꮋᴇᴛ ᴀᴋᴛиʙныx дᴇйᴄᴛʙий.", reply_markup=get_menu_keyboard(is_private, is_admin_chat))
             return "ok", 200
 
         if chat_type == "private" and chat_id != ADMIN_ID:
@@ -529,9 +550,39 @@ def webhook():
         return "ok", 200
 
 
+def update_worker():
+    while True:
+        update = UPDATE_QUEUE.get()
+        try:
+            process_update(update)
+        except Exception as e:
+            print(f"[update_worker] Exception: {e}")
+            traceback.print_exc()
+        finally:
+            UPDATE_QUEUE.task_done()
+
+
+threading.Thread(target=update_worker, daemon=True).start()
+
+
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        return "ok", 200
+    data = request.get_json(silent=True)
+    if not data:
+        return "ok", 200
+    try:
+        UPDATE_QUEUE.put_nowait(data)
+    except Full:
+        threading.Thread(target=process_update, args=(data,), daemon=True).start()
+    return "ok", 200
+
+
 @app.route("/set_webhook")
 def set_webhook():
-    return tg_request("setWebhook", {"url": WEBHOOK_URL})
+    res = tg_request("setWebhook", {"url": WEBHOOK_URL})
+    return res, (200 if res.get("ok") else 500)
 
 
 if __name__ == "__main__":
